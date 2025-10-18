@@ -312,130 +312,148 @@ def format_fssc_result(data: dict) -> Optional[str]:
         lines.append(f"🔗 View on FSSC: <a href=\"{esc(data['fssc_url'])}\">{esc(data['fssc_url'])}</a>")
     return "\n".join(lines)
 
-# ---------- Infinity (robust) ----------
-def _find_candidate_in_dict(d: Dict[str, Any], expected_keys: set) -> Optional[Dict[str, Any]]:
-    """Search nested dict for a dict that contains any expected keys."""
-    if not isinstance(d, dict):
-        return None
-    # direct match
-    if expected_keys & set(d.keys()):
-        return d
-    # search children
-    for v in d.values():
-        if isinstance(v, dict):
-            cand = _find_candidate_in_dict(v, expected_keys)
-            if cand:
-                return cand
-        if isinstance(v, list):
-            for item in v:
-                if isinstance(item, dict):
-                    if expected_keys & set(item.keys()):
-                        return item
-                    cand = _find_candidate_in_dict(item, expected_keys)
-                    if cand:
-                        return cand
-    return None
-
-def _extract_first_dict_from(obj: Any) -> Optional[Dict[str, Any]]:
-    """Given JSON obj, find a reasonable dict to use as the certificate object."""
-    expected_keys = {"rid", "stdname", "fathersname", "subject", "dob", "gender", "address", "mnam", "c1"}
-    # If it's already a dict with expected keys
-    if isinstance(obj, dict):
-        if expected_keys & set(obj.keys()):
-            return obj
-        # if values are digit-keyed dicts (like {'0': {...}, '1': {...}})
-        for k, v in obj.items():
-            if isinstance(k, str) and k.isdigit() and isinstance(v, dict):
-                if expected_keys & set(v.keys()):
-                    return v
-        # if there's 'data' key
-        if "data" in obj:
-            d = obj["data"]
-            if isinstance(d, dict):
-                if expected_keys & set(d.keys()):
-                    return d
-                # maybe dict of digit-keys
-                for kk, vv in d.items():
-                    if isinstance(vv, dict) and (expected_keys & set(vv.keys())):
-                        return vv
-                # try to pick first dict inside
-                for vv in d.values():
-                    if isinstance(vv, dict):
-                        return vv
-            if isinstance(d, list) and d:
-                for item in d:
-                    if isinstance(item, dict):
-                        if expected_keys & set(item.keys()):
-                            return item
-                # fallback: return first dict
-                for item in d:
-                    if isinstance(item, dict):
-                        return item
-        # general recursive search
-        cand = _find_candidate_in_dict(obj, expected_keys)
-        if cand:
-            return cand
-    # if obj is list, prefer first dict element that matches expected_keys
-    if isinstance(obj, list):
-        for item in obj:
-            if isinstance(item, dict) and (expected_keys & set(item.keys())):
-                return item
-        for item in obj:
-            if isinstance(item, dict):
-                return item
-    return None
-
+# ---------- Infinity ----------
 def infinity_post_cert(cert_no: str) -> Optional[Dict]:
-    """
-    Post to Infinity API and robustly extract certificate data.
-    Returns a dict or None.
-    """
     key = f"infty:{cert_no}"
     cached = cache_get(key)
     if cached:
         return cached
     try:
-        # Try the standard form-data POST first (compatible with original code)
         r = requests.post(INFINITY_API_URL, data={"postID": cert_no}, headers=INFINITY_HEADERS, timeout=20)
         r.raise_for_status()
         j = r.json()
-        logger.debug("Infinity API raw JSON: %s", j)
-
-        # If response is dict/list, attempt to extract a proper certificate dict
-        candidate = _extract_first_dict_from(j)
-        if candidate:
-            cache_set(key, candidate)
-            return candidate
-
-        # If not found, try alternate shapes: sometimes response might be {'success': True, 'items': [...]}
-        # we already attempted generic extraction above; as fallback try finding any first dict deeply
-        def find_any_dict(obj):
-            if isinstance(obj, dict):
-                for v in obj.values():
-                    if isinstance(v, dict):
-                        return v
-                    if isinstance(v, list):
-                        for it in v:
-                            if isinstance(it, dict):
-                                return it
-            if isinstance(obj, list):
-                for it in obj:
-                    if isinstance(it, dict):
-                        return it
-            return None
-
-        anydict = find_any_dict(j)
-        if anydict:
-            cache_set(key, anydict)
-            return anydict
-
-        # Nothing found
-        logger.info("Infinity: no candidate certificate found for %s (json keys: %s)", cert_no, list(j.keys()) if isinstance(j, dict) else type(j))
+        if isinstance(j, dict) and j.get("success"):
+            for k, v in j.items():
+                if k.isdigit() and isinstance(v, dict):
+                    cache_set(key, v)
+                    return v
+            if isinstance(j.get("data"), dict):
+                cache_set(key, j["data"])
+                return j["data"]
         return None
-
     except Exception as e:
         logger.exception("Infinity API error: %s", e)
         return None
+
+
+def format_infty(obj: dict) -> str:
+    esc = html.escape
+    if not obj:
+        return None
+    lines = ["<b>🔹 Infinity Cert International - Certificate Information</b>\n"]
+    fields = [("rid", "Certificate No"), ("stdname", "Issue Date"), ("fathersname", "Expiry Date"),
+              ("subject", "Standard"), ("dob", "Accreditation Body"), ("gender", "Organization"),
+              ("address", "Address"), ("mnam", "Scope"), ("c1", "Status")]
+    for k, label in fields:
+        val = obj.get(k)
+        lines.append(f"<b>{esc(label)}:</b> {esc(str(val)) if val not in (None, '') else '-'}")
+    return "\n".join(lines)
+
+
+# ---------- QRO (qrocert.com) simple submit ----------
+def extract_hidden_inputs(soup: BeautifulSoup) -> Dict[str, str]:
+    return {inp.get("name"): inp.get("value", "") for inp in soup.select("input[type=hidden]") if inp.get("name")}
+
+
+def find_input_name_by_suffix(soup: BeautifulSoup, suffixes: tuple) -> Optional[str]:
+    for inp in soup.find_all("input"):
+        idv = inp.get("id") or ""
+        namev = inp.get("name") or ""
+        for suf in suffixes:
+            if idv.endswith(suf) or namev.endswith(suf):
+                return namev or idv
+    return None
+
+
+def find_submit_name(soup: BeautifulSoup) -> Optional[str]:
+    for inp in soup.find_all(["input", "button"]):
+        t = (inp.get("type") or "").lower()
+        name = inp.get("name") or inp.get("id") or ""
+        if name.lower().endswith("button1") or t == "submit":
+            return name
+    return None
+
+
+def parse_label_map(soup: BeautifulSoup) -> Dict[str, str]:
+    labels = {}
+    for tag in soup.find_all(attrs={"id": True}):
+        m = re.search(r"(Label\d+)$", tag["id"])
+        if m:
+            labels[m.group(1)] = tag.get_text(" ", strip=True)
+    return labels
+
+
+def parse_certificate_from_html(html_text: str) -> Dict[str, Optional[str]]:
+    soup = BeautifulSoup(html_text, "lxml")
+    labels = parse_label_map(soup)
+    def g(n): return labels.get(f"Label{n}")
+    parsed = {
+        "certificate_no": g(8) or g(0),
+        "company": g(1),
+        "address": g(2),
+        "issue_date": g(3),
+        "expiry_date": g(7),
+        "status": g(4),
+        "standard": g(5)
+    }
+    for k, v in parsed.items():
+        if v is not None:
+            parsed[k] = v.strip() or None
+    return parsed
+
+
+def submit_qro_com(cert_no: str, issue_date: str) -> Tuple[bool, Dict[str, Optional[str]]]:
+    """
+    Simpler submission path for qrocert.com:
+    - GET verify-certification.aspx to read hidden inputs
+    - fill TextBox1, TextBox2 and Button1
+    - POST back to verify-certification.aspx and parse result
+    """
+    try:
+        sess = requests.Session()
+        sess.headers.update({"User-Agent": "CertCheckBot/1.0"})
+        # GET the verify page (contains the form)
+        r = sess.get(QRO_COM_VERIFY, timeout=15)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "lxml")
+        payload = extract_hidden_inputs(soup)
+        cert_name = find_input_name_by_suffix(soup, ("TextBox1", "TextBox1$")) or "TextBox1"
+        date_name = find_input_name_by_suffix(soup, ("TextBox2", "TextBox2$")) or "TextBox2"
+        btn_name = find_submit_name(soup) or "Button1"
+        payload[cert_name] = cert_no
+        payload[date_name] = issue_date
+        payload[btn_name] = "Submit"
+        post = sess.post(QRO_COM_VERIFY, data=payload, headers={"Referer": QRO_COM_VERIFY, "User-Agent": "CertCheckBot/1.0"}, timeout=15)
+        post.raise_for_status()
+        parsed = parse_certificate_from_html(post.text)
+        return True, parsed
+    except Exception as e:
+        logger.exception("submit_qro_com error: %s", e)
+        return False, {"error": str(e)}
+
+
+def submit_qro_org(cert_no: str, issue_date: str) -> Tuple[bool, Dict[str, Optional[str]]]:
+    # Keep previous generic ASP submit for qrocert.org
+    try:
+        sess = requests.Session()
+        sess.headers.update({"User-Agent": "CertCheckBot/1.0"})
+        r = sess.get(QRO_ORG_PAGE, timeout=15)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "lxml")
+        payload = extract_hidden_inputs(soup)
+        cert_name = find_input_name_by_suffix(soup, ("TextBox1", "TextBox1$")) or "TextBox1"
+        date_name = find_input_name_by_suffix(soup, ("TextBox2", "TextBox2$")) or "TextBox2"
+        btn_name = find_submit_name(soup) or "Button1"
+        payload[cert_name] = cert_no
+        payload[date_name] = issue_date
+        payload[btn_name] = "Submit"
+        post = sess.post(QRO_ORG_PAGE, data=payload, headers={"Referer": QRO_ORG_PAGE, "User-Agent": "CertCheckBot/1.0"}, timeout=15)
+        post.raise_for_status()
+        parsed = parse_certificate_from_html(post.text)
+        return True, parsed
+    except Exception as e:
+        logger.exception("submit_qro_org error: %s", e)
+        return False, {"error": str(e)}
 
 def format_infty(obj: dict) -> Optional[str]:
     if not obj:
@@ -1323,3 +1341,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
