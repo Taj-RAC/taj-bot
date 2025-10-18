@@ -314,26 +314,41 @@ def format_fssc_result(data: dict) -> Optional[str]:
 
 # ---------- Infinity ----------
 def infinity_post_cert(cert_no: str) -> Optional[Dict]:
+    """
+    Fixed Infinity Cert API function – uses JSON instead of form-data.
+    """
     key = f"infty:{cert_no}"
     cached = cache_get(key)
     if cached:
         return cached
+
     try:
-        r = requests.post(INFINITY_API_URL, data={"postID": cert_no}, headers=INFINITY_HEADERS, timeout=20)
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "CertCheckBot/1.0"
+        }
+        payload = {"postID": cert_no}
+        r = requests.post(INFINITY_API_URL, json=payload, headers=headers, timeout=20)
         r.raise_for_status()
         j = r.json()
+
+        # Infinity returns results either in dict["data"] or as numbered keys
         if isinstance(j, dict) and j.get("success"):
+            if isinstance(j.get("data"), dict):
+                cache_set(key, j["data"])
+                return j["data"]
+            # sometimes response has numeric keys
             for k, v in j.items():
                 if k.isdigit() and isinstance(v, dict):
                     cache_set(key, v)
                     return v
-            if isinstance(j.get("data"), dict):
-                cache_set(key, j["data"])
-                return j["data"]
         return None
+
     except Exception as e:
         logger.exception("Infinity API error: %s", e)
         return None
+
 
 
 def format_infty(obj: dict) -> str:
@@ -1341,4 +1356,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
