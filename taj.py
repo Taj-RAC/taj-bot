@@ -5,10 +5,9 @@ cert_bot_qrocom_submit_mainmenu_with_sisbel.py
 Merged TajCert Bot (main menu edition) with SISBEL (q.sisbel.com) verification added as
 an additional certification-body (callback cb:sisbel).
 
-- Keeps original token and behavior.
-- Adds SISBEL API as a new certification body option.
-- SISBEL flow asks for company name then certificate number and queries the SISBEL API.
-- CAPTCHA logic and verification-preservation semantics remain unchanged.
+This version includes a more robust `infinity_post_cert` implementation that
+handles multiple JSON response shapes from the Infinity API and attempts to
+extract the certificate record reliably.
 """
 
 import logging
@@ -210,16 +209,16 @@ def clear_flow_keep_verified(user_data: Dict[str, Any]) -> None:
     if verified:
         user_data["verified"] = True
 
-# ---------------- (All verification functions unchanged) ----------------
+# ---------------- (All verification functions unchanged except Infinity) ----------------
 # For brevity in this file these functions remain the same as in the original bot:
 # - fetch_fssc_by_coid, format_fssc_result
-# - infinity_post_cert, format_infty
+# - format_infty (unchanged)
 # - extract_hidden_inputs, find_input_name_by_suffix, find_submit_name
 # - parse_label_map, parse_certificate_from_html
 # - submit_qro_com, submit_qro_org, format_qro
 # - fetch_qsi_simple, format_qsi_simple
 #
-# Implementations follow (copied from original bot):
+# Implementations follow (copied from original bot) with a fixed infinity_post_cert:
 # -------------------------------------------------------------------------
 
 # ---------- FSSC ----------
@@ -307,31 +306,133 @@ def format_fssc_result(data: dict) -> Optional[str]:
         lines.append("")
         lines.append("<b>📂 FSSC Categories:</b>")
         for c in data.get("categories", []):
-            lines.append(f" - {esc(c.get('code') or '-')} — {esc(c.get('title') or '-')}")
+            lines.append(f" - {esc(c.get('code') or '-')} — {esc(c.get('title') or '-')}") 
     lines.append("")
     if data.get("fssc_url"):
         lines.append(f"🔗 View on FSSC: <a href=\"{esc(data['fssc_url'])}\">{esc(data['fssc_url'])}</a>")
     return "\n".join(lines)
 
-# ---------- Infinity ----------
+# ---------- Infinity (robust) ----------
+def _find_candidate_in_dict(d: Dict[str, Any], expected_keys: set) -> Optional[Dict[str, Any]]:
+    """Search nested dict for a dict that contains any expected keys."""
+    if not isinstance(d, dict):
+        return None
+    # direct match
+    if expected_keys & set(d.keys()):
+        return d
+    # search children
+    for v in d.values():
+        if isinstance(v, dict):
+            cand = _find_candidate_in_dict(v, expected_keys)
+            if cand:
+                return cand
+        if isinstance(v, list):
+            for item in v:
+                if isinstance(item, dict):
+                    if expected_keys & set(item.keys()):
+                        return item
+                    cand = _find_candidate_in_dict(item, expected_keys)
+                    if cand:
+                        return cand
+    return None
+
+def _extract_first_dict_from(obj: Any) -> Optional[Dict[str, Any]]:
+    """Given JSON obj, find a reasonable dict to use as the certificate object."""
+    expected_keys = {"rid", "stdname", "fathersname", "subject", "dob", "gender", "address", "mnam", "c1"}
+    # If it's already a dict with expected keys
+    if isinstance(obj, dict):
+        if expected_keys & set(obj.keys()):
+            return obj
+        # if values are digit-keyed dicts (like {'0': {...}, '1': {...}})
+        for k, v in obj.items():
+            if isinstance(k, str) and k.isdigit() and isinstance(v, dict):
+                if expected_keys & set(v.keys()):
+                    return v
+        # if there's 'data' key
+        if "data" in obj:
+            d = obj["data"]
+            if isinstance(d, dict):
+                if expected_keys & set(d.keys()):
+                    return d
+                # maybe dict of digit-keys
+                for kk, vv in d.items():
+                    if isinstance(vv, dict) and (expected_keys & set(vv.keys())):
+                        return vv
+                # try to pick first dict inside
+                for vv in d.values():
+                    if isinstance(vv, dict):
+                        return vv
+            if isinstance(d, list) and d:
+                for item in d:
+                    if isinstance(item, dict):
+                        if expected_keys & set(item.keys()):
+                            return item
+                # fallback: return first dict
+                for item in d:
+                    if isinstance(item, dict):
+                        return item
+        # general recursive search
+        cand = _find_candidate_in_dict(obj, expected_keys)
+        if cand:
+            return cand
+    # if obj is list, prefer first dict element that matches expected_keys
+    if isinstance(obj, list):
+        for item in obj:
+            if isinstance(item, dict) and (expected_keys & set(item.keys())):
+                return item
+        for item in obj:
+            if isinstance(item, dict):
+                return item
+    return None
+
 def infinity_post_cert(cert_no: str) -> Optional[Dict]:
+    """
+    Post to Infinity API and robustly extract certificate data.
+    Returns a dict or None.
+    """
     key = f"infty:{cert_no}"
     cached = cache_get(key)
     if cached:
         return cached
     try:
+        # Try the standard form-data POST first (compatible with original code)
         r = requests.post(INFINITY_API_URL, data={"postID": cert_no}, headers=INFINITY_HEADERS, timeout=20)
         r.raise_for_status()
         j = r.json()
-        if isinstance(j, dict) and j.get("success"):
-            for k, v in j.items():
-                if k.isdigit() and isinstance(v, dict):
-                    cache_set(key, v)
-                    return v
-            if isinstance(j.get("data"), dict):
-                cache_set(key, j["data"])
-                return j["data"]
+        logger.debug("Infinity API raw JSON: %s", j)
+
+        # If response is dict/list, attempt to extract a proper certificate dict
+        candidate = _extract_first_dict_from(j)
+        if candidate:
+            cache_set(key, candidate)
+            return candidate
+
+        # If not found, try alternate shapes: sometimes response might be {'success': True, 'items': [...]}
+        # we already attempted generic extraction above; as fallback try finding any first dict deeply
+        def find_any_dict(obj):
+            if isinstance(obj, dict):
+                for v in obj.values():
+                    if isinstance(v, dict):
+                        return v
+                    if isinstance(v, list):
+                        for it in v:
+                            if isinstance(it, dict):
+                                return it
+            if isinstance(obj, list):
+                for it in obj:
+                    if isinstance(it, dict):
+                        return it
+            return None
+
+        anydict = find_any_dict(j)
+        if anydict:
+            cache_set(key, anydict)
+            return anydict
+
+        # Nothing found
+        logger.info("Infinity: no candidate certificate found for %s (json keys: %s)", cert_no, list(j.keys()) if isinstance(j, dict) else type(j))
         return None
+
     except Exception as e:
         logger.exception("Infinity API error: %s", e)
         return None
@@ -935,7 +1036,7 @@ async def cb_selected_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if cb == "infinity":
         context.user_data["awaiting_cert_no"] = True
-        await q.edit_message_text("You selected *Infinity*.\n\n" + PROMPT_CERT_NO, parse_mode=ParseMode.MARKDOWN)
+        await q.edit_message.reply_text if False else await q.edit_message_text("You selected *Infinity*.\n\n" + PROMPT_CERT_NO, parse_mode=ParseMode.MARKDOWN)
         return
 
     if cb == "qsi":
