@@ -9,6 +9,11 @@ an additional certification-body (callback cb:sisbel).
 - Adds SISBEL API as a new certification body option.
 - SISBEL flow asks for company name then certificate number and queries the SISBEL API.
 - CAPTCHA logic and verification-preservation semantics remain unchanged.
+
+Added:
+- Request Certification submenu (buttons linking to Application_Form.php)
+- FSSC flow: choose FSSC 22000 / 24000 -> Verify by COID or Verify by Company Name.
+- find_coid_by_company_name() helper to resolve COID from FSSC public-register search HTML.
 """
 
 import logging
@@ -61,34 +66,65 @@ MAIN_MENU_TEXT = (
 # Main menu keyboard (buttons as requested)
 MAIN_MENU_KB = InlineKeyboardMarkup(
     [
-        [InlineKeyboardButton("🔎 Check Certificate", callback_data="main:check")],
-        [InlineKeyboardButton("✍️ Request Certification", url="https://taj-ra.com/Application_Form.php")],
-        [InlineKeyboardButton("📞 Contact", callback_data="main:contact")],
-        [InlineKeyboardButton("🗺️ Address", callback_data="main:address")],
+        [InlineKeyboardButton("🧐 Check Certificate", callback_data="main:check")],
+        [InlineKeyboardButton("✍ Request Certification", callback_data="main:request")],
+        [InlineKeyboardButton("📱 Contact", callback_data="main:contact")],
+        [InlineKeyboardButton("🗺 Address", callback_data="main:address")],
         [InlineKeyboardButton("🌐 Website", url="https://taj-ra.com/en/")],
+    ]
+)
+
+# Request submenu (all buttons link to the application form URL)
+REQUEST_CERT_KB = InlineKeyboardMarkup(
+    [
+        [InlineKeyboardButton("🍽 FSSC Certification", url="https://taj-ra.com/Application_Form.php")],
+        [InlineKeyboardButton("📋 ISO Certification", url="https://taj-ra.com/Application_Form.php")],
+        [InlineKeyboardButton("☣ HACCP Certification", url="https://taj-ra.com/Application_Form.php")],
+        [InlineKeyboardButton("🏭 GMP Certification", url="https://taj-ra.com/Application_Form.php")],
+        [InlineKeyboardButton("🕌 HALAL Certification", url="https://taj-ra.com/Application_Form.php")],
+        [InlineKeyboardButton("🔙 Back to Main Menu", callback_data="main:menu")],
     ]
 )
 
 # certificate type keyboard (same as before)
 TYPE_KB = InlineKeyboardMarkup(
     [
-        [InlineKeyboardButton("🔎 Verify FSSC Certificate", callback_data="type:fssc")],
-        [InlineKeyboardButton("🔎 Verify ISO Certificate", callback_data="type:iso")],
-        [InlineKeyboardButton("🔎 Verify HACCP Certificate", callback_data="type:haccp")],
-        [InlineKeyboardButton("🔎 Verify GMP Certificate", callback_data="type:gmp")],
-        [InlineKeyboardButton("🔎 Verify Halal Certificate", callback_data="type:halal")],
+        [InlineKeyboardButton("🧐 Verify FSSC Certificate 🍽", callback_data="type:fssc")],
+        [InlineKeyboardButton("🧐 Verify ISO Certificate 📋", callback_data="type:iso")],
+        [InlineKeyboardButton("🧐 Verify HACCP Certificate ☣", callback_data="type:haccp")],
+        [InlineKeyboardButton("🧐 Verify GMP Certificate 🏭", callback_data="type:gmp")],
+        [InlineKeyboardButton("🧐 Verify Halal Certificate 🕌", callback_data="type:halal")],
     ]
 )
+
+# FSSC standard selection keyboard
+FSSC_STANDARD_KB = InlineKeyboardMarkup(
+    [
+        [InlineKeyboardButton("🧐 FSSC 22000 🌐", callback_data="fssc:22000")],
+        [InlineKeyboardButton("🧐 FSSC 24000 🏭", callback_data="fssc:24000")],
+        [InlineKeyboardButton("🔙 Back to Types", callback_data="main:check")],
+    ]
+)
+
+# FSSC method keyboard builder
+def make_fssc_method_kb(standard: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🆔 Verify by COID Number", callback_data=f"fssc_method:{standard}:coid")],
+            [InlineKeyboardButton("🏭 Verify by Company Name", callback_data=f"fssc_method:{standard}:company")],
+            [InlineKeyboardButton("🔙 Back to FSSC Standards", callback_data="type:fssc")],
+        ]
+    )
 
 # certification-body keyboard builder function will include all CBs (qro_com, qro_org, qsi, infinity, fssc, sisbel, other)
 def make_cb_keyboard_for_type(ctype: str) -> InlineKeyboardMarkup:
     kb = []
-    kb.append([InlineKeyboardButton("QRO - IAF Accredited", callback_data="cb:qro_org")])
-    kb.append([InlineKeyboardButton("QRO - UKAF Accredited", callback_data="cb:qro_com")])
+    kb.append([InlineKeyboardButton("QRO | IAF", callback_data="cb:qro_org")])
+    kb.append([InlineKeyboardButton("QRO | UKAF", callback_data="cb:qro_com")])
     kb.append([InlineKeyboardButton("QSI Cert Canada", callback_data="cb:qsi")])
-    kb.append([InlineKeyboardButton("Infinity Cert International", callback_data="cb:infinity")])
-    kb.append([InlineKeyboardButton("SISBEL", callback_data="cb:sisbel")])  # SISBEL option
-    kb.append([InlineKeyboardButton("↩️ Back to Main Menu", callback_data="main:menu")])
+    kb.append([InlineKeyboardButton("Infinity ICI", callback_data="cb:infinity")])
+    kb.append([InlineKeyboardButton("SiSBEL", callback_data="cb:sisbel")])  # SISBEL option
+    kb.append([InlineKeyboardButton("🔙 Back to Main Menu", callback_data="main:menu")])
     return InlineKeyboardMarkup(kb)
 
 # Re-run / back KB used after verification
@@ -219,8 +255,8 @@ def clear_flow_keep_verified(user_data: Dict[str, Any]) -> None:
 # - submit_qro_com, submit_qro_org, format_qro
 # - fetch_qsi_simple, format_qsi_simple
 #
-# Implementations follow (copied from original bot):
-# -------------------------------------------------------------------------
+# Implementations follow (copied from original bot) with a single addition:
+# a helper to find COID by company name on FSSC public-register pages.
 
 # ---------- FSSC ----------
 def fetch_fssc_by_coid(coid: str) -> Any:
@@ -289,6 +325,15 @@ def fetch_fssc_by_coid(coid: str) -> Any:
     data["categories"] = cats
     data["fssc_url"] = url
     cache_set(key, data)
+    # store mapping by organization name if available
+    try:
+        name_key = data.get("organization", "").strip().lower()
+        if name_key:
+            idx = cache_get("fssc_name_index") or {}
+            idx[name_key] = data.get("coid") or coid
+            cache_set("fssc_name_index", idx)
+    except Exception:
+        pass
     return data
 
 def format_fssc_result(data: dict) -> Optional[str]:
@@ -296,21 +341,22 @@ def format_fssc_result(data: dict) -> Optional[str]:
     if not data or data == "not_found":
         return None
     lines = [f"<b>{esc(data.get('organization') or '-')}</b>", ""]
-    lines.append(f"📜 <b>Scheme:</b> {esc(data.get('scheme') or '-')}")
-    lines.append(f"✅ <b>Valid until:</b> {esc(data.get('valid_until') or '-')}")
-    lines.append(f"🆔 <b>COID:</b> {esc(data.get('coid') or '-')}")
-    lines.append(f"📍 <b>Address:</b> {esc(data.get('address') or '-')}")
-    ptypes = ", ".join(data.get("product_types") or []) or "-"
-    lines.append(f"🛒 <b>Product types:</b> {esc(ptypes)}")
-    lines.append(f"📝 <b>Scope:</b> {esc(data.get('scope_statement') or '-')}")
-    if data.get("categories"):
-        lines.append("")
-        lines.append("<b>📂 FSSC Categories:</b>")
-        for c in data.get("categories", []):
-            lines.append(f" - {esc(c.get('code') or '-')} — {esc(c.get('title') or '-')}")
-    lines.append("")
-    if data.get("fssc_url"):
-        lines.append(f"🔗 View on FSSC: <a href=\"{esc(data['fssc_url'])}\">{esc(data['fssc_url'])}</a>")
+    lines.append(f"📜 <b>Scheme:</b> {esc(data.get('scheme') or '-')}") 
+    lines.append(f"✅ <b>Valid until:</b> {esc(data.get('valid_until') or '-')}") 
+    lines.append(f"🆔 <b>COID:</b> {esc(data.get('coid') or '-')}") 
+    lines.append(
+    f"📍 <b>Address:</b> {html.escape(' '.join(data.get('address', '-').split()))}")
+    ptypes = ",".join(data.get("product_types") or []) or "-" 
+    lines.append(f"🛒 <b>Product types:</b> {esc(ptypes)}") 
+    lines.append(f"📝 <b>Scope:</b> {esc(data.get('scope_statement') or '-')}") 
+    if data.get("categories"): 
+        lines.append("") 
+        lines.append("<b>📂 FSSC Categories:</b>") 
+        for c in data.get("categories", []): 
+            lines.append(f" - {esc(c.get('code') or '-')} — {esc(c.get('title') or '-')}") 
+    lines.append("") 
+    if data.get("fssc_url"): 
+        lines.append(f"🔗 View on FSSC: <a href=\"{esc(data['fssc_url'])}\">{esc(data['fssc_url'])}</a>") 
     return "\n".join(lines)
 
 # ---------- Infinity ----------
@@ -453,13 +499,13 @@ def format_qro(parsed: dict) -> Optional[str]:
         return None
     esc = html.escape
     lines = ["<b>🟩 QRO Certification Company</b>"]
-    lines.append(f"<b>🏢 Company:</b> {esc(parsed.get('company') or '-')}")
-    lines.append(f"<b>🔢 Certificate No:</b> {esc(parsed.get('certificate_no') or '-')}")
-    lines.append(f"<b>📅 Issue Date:</b> {esc(parsed.get('issue_date') or '-')}")
-    lines.append(f"<b>⏳ Expiry Date:</b> {esc(parsed.get('expiry_date') or '-')}")
-    lines.append(f"<b>✅ Status:</b> {esc(parsed.get('status') or '-')}")
-    lines.append(f"<b>🔖 Standard:</b> {esc(parsed.get('standard') or '-')}")
-    lines.append(f"<b>📍 Address:</b> {esc(parsed.get('address') or '-')}")
+    lines.append(f"<b>🏢 Company:</b> {esc(parsed.get('company') or '-')}") 
+    lines.append(f"<b>🔢 Certificate No:</b> {esc(parsed.get('certificate_no') or '-')}") 
+    lines.append(f"<b>📅 Issue Date:</b> {esc(parsed.get('issue_date') or '-')}") 
+    lines.append(f"<b>⏳ Expiry Date:</b> {esc(parsed.get('expiry_date') or '-')}") 
+    lines.append(f"<b>✅ Status:</b> {esc(parsed.get('status') or '-')}") 
+    lines.append(f"<b>🔖 Standard:</b> {esc(parsed.get('standard') or '-')}") 
+    lines.append(f"<b>📍 Address:</b> {esc(parsed.get('address') or '-')}") 
     return "\n".join(lines)
 
 # ---------- QSI scraping ----------
@@ -648,6 +694,70 @@ def format_qsi_simple(parsed: dict) -> Optional[str]:
     lines.append(f"<b>✅ Status:</b> {esc(parsed.get('status') or '-')}")
     return "\n".join(lines)
 
+# ---------------- New helper: find COID by company name on FSSC ----------------
+def find_coid_by_company_name(company_name: str) -> Optional[str]:
+    """
+    Resolve COID by searching the FSSC public-register search endpoint:
+      https://www.fssc.com/public-register/?search=<encoded>
+    Strategy:
+      1) Look for text like "COID: AFG-1-7798-696622" in raw html (case-insensitive).
+      2) Parse <span class="co-id"> and extract COID text.
+      3) Fallback: find hrefs like /public-register/<coid>
+    Caches found mapping under 'fssc_name_index'.
+    """
+    if not company_name:
+        return None
+    name_key = re.sub(r"\s+", " ", company_name.strip().lower())
+    # check cache
+    idx = cache_get("fssc_name_index") or {}
+    if name_key in idx:
+        return idx[name_key]
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; CertCheckBot/1.0)",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    try:
+        q_enc = requests.utils.quote(company_name)
+        url = f"https://www.fssc.com/public-register/?search={q_enc}"
+        r = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+        html_text = r.text or ""
+    except Exception as e:
+        logger.exception("find_coid_by_company_name: request error: %s", e)
+        return None
+    # 1) raw COID text
+    m = re.search(r"COID\s*[:\-]?\s*([A-Za-z0-9\-]+)", html_text, re.I)
+    if m:
+        coid = m.group(1).strip()
+        idx[name_key] = coid
+        cache_set("fssc_name_index", idx)
+        logger.info("find_coid_by_company_name: found COID (raw text) %s for %s", coid, name_key)
+        return coid
+    # 2) span.co-id
+    try:
+        soup = BeautifulSoup(html_text, "html.parser")
+        span = soup.select_one("span.co-id")
+        if span:
+            txt = span.get_text(" ", strip=True)
+            m2 = re.search(r"COID\s*[:\-]?\s*([A-Za-z0-9\-]+)", txt, re.I)
+            if m2:
+                coid = m2.group(1).strip()
+                idx[name_key] = coid
+                cache_set("fssc_name_index", idx)
+                logger.info("find_coid_by_company_name: found COID (span) %s for %s", coid, name_key)
+                return coid
+    except Exception:
+        pass
+    # 3) fallback: href /public-register/<coid>
+    m3 = re.search(r"/public-register/([A-Za-z0-9\-]+)/?", html_text, re.I)
+    if m3:
+        coid = m3.group(1).strip()
+        idx[name_key] = coid
+        cache_set("fssc_name_index", idx)
+        logger.info("find_coid_by_company_name: found COID (href) %s for %s", coid, name_key)
+        return coid
+    logger.info("find_coid_by_company_name: no COID found for %s", name_key)
+    return None
+
 # ---------------- Dispatcher / verification core ----------------
 async def verify_for_cb(cb: str, cert_no: str, issue_date_qro: Optional[str]) -> Tuple[str, bool, Dict[str, str]]:
     meta = {"cb": "Unknown", "ab": "Not provided"}
@@ -810,6 +920,11 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await q.edit_message_text("Please select the type of certificate you would like to verify:", parse_mode=ParseMode.MARKDOWN, reply_markup=TYPE_KB)
         return
 
+    if action == "request":
+        # Show request certification submenu (links)
+        await q.edit_message_text("Choose the certification form to open:", parse_mode=ParseMode.MARKDOWN, reply_markup=REQUEST_CERT_KB)
+        return
+
     if action == "menu":
         # back to main menu: clear flow but keep verified flag
         clear_flow_keep_verified(context.user_data)
@@ -894,13 +1009,85 @@ async def type_selected_callback(update: Update, context: ContextTypes.DEFAULT_T
     clear_flow_keep_verified(context.user_data)
     context.user_data["cert_type"] = ctype
 
+    # FSSC now shows standard selection keyboard
     if ctype == "fssc":
-        context.user_data["awaiting_coid"] = True
-        await q.edit_message_text(PROMPT_COID, parse_mode=ParseMode.MARKDOWN)
+        await q.edit_message_text("Choose FSSC standard:", parse_mode=ParseMode.MARKDOWN, reply_markup=FSSC_STANDARD_KB)
         return
 
     kb = make_cb_keyboard_for_type(ctype)
     await q.edit_message_text(f"You selected *{ctype.upper()}*.\n\nPlease select the Certification Body to proceed:", parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+
+# ---------- FSSC callback handlers ----------
+async def fssc_selected_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handler for callbacks like 'fssc:22000' or 'fssc:24000'
+    Presents method keyboard (COID vs Company Name).
+    """
+    q = update.callback_query
+    await q.answer()
+    if not context.user_data.get("verified"):
+        if not context.user_data.get("awaiting_captcha"):
+            q_text, _ = start_captcha_for_user(context.user_data)
+        else:
+            q_text = context.user_data.get("captcha_question", "Please answer the verification question.")
+        await q.edit_message_text(
+            "🛡️ Verification required\n\n"
+            "Please solve this simple question before using the bot:\n\n"
+            f"*{q_text}*\n\n"
+            "Reply with the numeric answer. You have 3 attempts.",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="main:menu")]]),
+        )
+        return
+
+    _, standard = q.data.split(":", 1)
+    context.user_data["fssc_standard"] = standard
+    # show method selection
+    await q.edit_message_text(f"You selected *FSSC {standard}*.\n\nChoose verification method:", parse_mode=ParseMode.MARKDOWN, reply_markup=make_fssc_method_kb(standard))
+
+async def fssc_method_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handler for 'fssc_method:<standard>:<method>' where method is 'coid' or 'company'
+    """
+    q = update.callback_query
+    await q.answer()
+    if not context.user_data.get("verified"):
+        if not context.user_data.get("awaiting_captcha"):
+            q_text, _ = start_captcha_for_user(context.user_data)
+        else:
+            q_text = context.user_data.get("captcha_question", "Please answer the verification question.")
+        await q.edit_message_text(
+            "🛡️ Verification required\n\n"
+            "Please solve this simple question before using the bot:\n\n"
+            f"*{q_text}*\n\n"
+            "Reply with the numeric answer. You have 3 attempts.",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="main:menu")]]),
+        )
+        return
+
+    try:
+        _, standard, method = q.data.split(":", 2)
+    except Exception:
+        await q.edit_message_text("Invalid selection. Returning to main menu.", reply_markup=MAIN_MENU_KB)
+        return
+
+    context.user_data["fssc_standard"] = standard
+    # mark we're in an FSSC flow
+    context.user_data["in_fssc_flow"] = True
+
+    if method == "coid":
+        context.user_data["awaiting_coid"] = True
+        await q.edit_message_text(PROMPT_COID, parse_mode=ParseMode.MARKDOWN)
+        return
+
+    if method == "company":
+        # Ask for company name (we will attempt to resolve COID automatically; if not found we will ask user for COID)
+        context.user_data["awaiting_fssc_company"] = True
+        await q.edit_message_text("Please enter the *company name* (exact or partial). I will try to find the COID automatically; if I can't, I'll ask you to provide the COID manually.", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    await q.edit_message_text("Unknown method selected.", reply_markup=MAIN_MENU_KB)
 
 # certification-body selection handler (unchanged behavior except for SISBEL addition)
 async def cb_selected_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1095,13 +1282,26 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("—", reply_markup=AGAIN_KB)
         return
 
-    # FSSC COID flow
-    if context.user_data.get("awaiting_coid"):
-        coid = text
-        # clear temporary flow while keeping verification
-        clear_flow_keep_verified(context.user_data)
+    # ----- FSSC flow: company-name -> attempt auto-COID resolution ----- 
+    if context.user_data.get("awaiting_fssc_company"):
+        company_name = text.strip()
+        context.user_data.pop("awaiting_fssc_company", None)
+        context_user = context.user_data
+        context_user["last_searched_company"] = company_name
+        # attempt to resolve COID
         await update.message.reply_text(PROCESSING)
+        coid = await asyncio.to_thread(find_coid_by_company_name, company_name)
+        if not coid:
+            # couldn't auto-resolve, ask user to provide COID
+            context_user["awaiting_coid"] = True
+            # keep fssc flow marker set
+            context_user["in_fssc_flow"] = True
+            await update.message.reply_text("I couldn't automatically find the COID for that company.\n\nPlease provide the COID ID so I can fetch the certificate.", parse_mode=ParseMode.MARKDOWN)
+            return
+        # got COID -> fetch FSSC details
         res = await asyncio.to_thread(fetch_fssc_by_coid, coid)
+        # clear flow but keep verified
+        clear_flow_keep_verified(context.user_data)
         if isinstance(res, dict) and res.get("error"):
             await update.message.reply_text(f"{ERROR_MSG}\n\n{html.escape(res.get('error'))}")
             await update.message.reply_text(THANK_YOU_BRIEF)
@@ -1121,7 +1321,62 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("—", reply_markup=AGAIN_KB)
         return
 
-    # awaiting certificate number
+    # ----- FSSC COID flow (used both when user selects Verify by COID or after company name fallback) -----
+    if context.user_data.get("awaiting_coid"):
+        coid_input = text.strip()
+        # If user input contains "COID: ..." remove label
+        coid_input = re.sub(r"(?i)^COID:\s*", "", coid_input).strip()
+        # clear temporary flow while keeping verification
+        # preserve marker whether we were in fssc flow
+        in_fssc_flow = bool(context.user_data.get("in_fssc_flow"))
+        clear_flow_keep_verified(context.user_data)
+        if in_fssc_flow:
+            # set nothing else, we will fetch fssc_by_coid
+            await update.message.reply_text(PROCESSING)
+            res = await asyncio.to_thread(fetch_fssc_by_coid, coid_input)
+            if isinstance(res, dict) and res.get("error"):
+                await update.message.reply_text(f"{ERROR_MSG}\n\n{html.escape(res.get('error'))}")
+                await update.message.reply_text(THANK_YOU_BRIEF)
+                await update.message.reply_text("—", reply_markup=AGAIN_KB)
+                return
+            if res == "not_found":
+                await update.message.reply_text(f"❌ No certificate found for COID: {html.escape(coid_input)}")
+                await update.message.reply_text(THANK_YOU_BRIEF)
+                await update.message.reply_text("—", reply_markup=AGAIN_KB)
+                return
+            formatted = format_fssc_result(res) or NOT_FOUND
+            await safe_send_text(update.message.reply_text, formatted, disable_web_page_preview=False)
+            cb_name = "FSSC Public Register"
+            ab = "FSSC / Not provided"
+            await update.message.reply_text(f"🔎 *Source:* {cb_name}\n🏷️ *Accreditation Body:* {ab}", parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text(THANK_YOU_BRIEF)
+            await update.message.reply_text("—", reply_markup=AGAIN_KB)
+            return
+        else:
+            # Not an fssc-specific coid prompt: handle as general COID (original behavior)
+            # clear temporary flow while keeping verification (done already)
+            await update.message.reply_text(PROCESSING)
+            res = await asyncio.to_thread(fetch_fssc_by_coid, coid_input)
+            if isinstance(res, dict) and res.get("error"):
+                await update.message.reply_text(f"{ERROR_MSG}\n\n{html.escape(res.get('error'))}")
+                await update.message.reply_text(THANK_YOU_BRIEF)
+                await update.message.reply_text("—", reply_markup=AGAIN_KB)
+                return
+            if res == "not_found":
+                await update.message.reply_text(f"❌ No certificate found for COID: {html.escape(coid_input)}")
+                await update.message.reply_text(THANK_YOU_BRIEF)
+                await update.message.reply_text("—", reply_markup=AGAIN_KB)
+                return
+            formatted = format_fssc_result(res) or NOT_FOUND
+            await safe_send_text(update.message.reply_text, formatted, disable_web_page_preview=False)
+            cb_name = "FSSC Public Register"
+            ab = "FSSC / Not provided"
+            await update.message.reply_text(f"🔎 *Source:* {cb_name}\n🏷️ *Accreditation Body:* {ab}", parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text(THANK_YOU_BRIEF)
+            await update.message.reply_text("—", reply_markup=AGAIN_KB)
+            return
+
+    # awaiting certificate number (other CBs)
     if context.user_data.get("awaiting_cert_no"):
         cert_no = text
         context.user_data["cert_no"] = cert_no
@@ -1214,10 +1469,13 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(type_selected_callback, pattern=r"^type:"))
     app.add_handler(CallbackQueryHandler(cb_selected_callback, pattern=r"^cb:"))
     app.add_handler(CallbackQueryHandler(cb_again_handler, pattern=r"^again$"))
+    # FSSC handlers
+    app.add_handler(CallbackQueryHandler(fssc_selected_callback, pattern=r"^fssc:"))
+    app.add_handler(CallbackQueryHandler(fssc_method_callback, pattern=r"^fssc_method:"))
     # Text handler
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
 
-    logger.info("TajCert Bot (main menu + SISBEL) starting...")
+    logger.info("TajCert Bot (main menu + SISBEL + FSSC fixes) starting...")
     app.run_polling()
 
 if __name__ == "__main__":
