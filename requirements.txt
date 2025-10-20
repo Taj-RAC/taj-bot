@@ -5,3 +5,4 @@ lxml
 certifi
 urllib3
 idna
+fpdf
